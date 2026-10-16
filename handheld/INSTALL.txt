@@ -1,0 +1,55 @@
+celeste-everest-proton-arm64
+===========================
+
+Fixes Everest's first-run patch step on ARM64 Android handhelds (Retroid
+Pocket Nova, DroidDeck and friends), where Wine has no native PDB libraries.
+
+WHAT TO DO
+----------
+
+1. Find your Celeste game folder - the one with Celeste.exe in it. On a
+   handheld this is usually
+
+     /root/.local/share/Steam/steamapps/common/Celeste/
+
+   Celeste is Steam app 504230.
+
+2. BACK UP the two files you are about to replace. Copy Mono.Cecil.Pdb.dll and
+   MonoMod.exe out of the game folder before you overwrite them.
+
+3. Copy both files from this folder into the game folder, overwriting what is
+   already there.
+
+4. Launch Celeste through Steam. Let Everest finish its first patch. You should
+   reach the title screen.
+
+You need this whenever Everest has to patch the game on the device: a fresh
+setup, after Steam "verify integrity", or after a game/Everest update. If you
+installed Everest on a PC and copied the finished folder over, you may not
+need it yet - but keep it, because the next re-patch will.
+
+WHICH FILE IS PATCHED
+---------------------
+
+Mono.Cecil.Pdb.dll is Cecil 0.11.4.0 rebuilt so that its native PDB writer
+entry points return null:
+
+  Mono.Cecil.Pdb.PdbWriterProvider::GetSymbolWriter        (both overloads)
+  Mono.Cecil.Pdb.NativePdbWriterProvider::GetSymbolWriter  (both overloads)
+  Mono.Cecil.Pdb.NativePdbWriterProvider::CreateWriter
+
+Nothing else is changed; the PDB *reader* side is untouched upstream code.
+
+  Mono.Cecil.Pdb.dll  88064 bytes
+  30e233b32625d933520a2df22c41be2822d0530a849b9dfb4c67dbc01b7b2b48
+
+MonoMod.exe is unmodified, straight from Everest 4449:
+
+  67584 bytes
+  4cc92af374e5c3af63e76f2e31647f6ad2baf49a8a5446ea17a193482969ffc4
+
+Do not judge these files by version number. Three different Cecil 0.11.4.0
+builds exist and they are not interchangeable; compare hashes.
+
+Full notes, troubleshooting and licensing:
+https://github.com/jevonlipsey/celeste-everest-proton-arm64

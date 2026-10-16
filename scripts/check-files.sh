@@ -21,6 +21,13 @@ fi
 KNOWN_MONOMOD='4cc92af374e5c3af63e76f2e31647f6ad2baf49a8a5446ea17a193482969ffc4'
 KNOWN_CECIL_PDB='30e233b32625d933520a2df22c41be2822d0530a849b9dfb4c67dbc01b7b2b48'
 
+# android's toybox ships sha256sum, macos only has shasum
+if command -v sha256sum >/dev/null 2>&1; then
+    hash_of() { sha256sum "$1" | cut -d' ' -f1; }
+else
+    hash_of() { shasum -a 256 "$1" | cut -d' ' -f1; }
+fi
+
 FILES=(
     MonoMod.exe
     MonoMod.Utils.dll
@@ -40,7 +47,7 @@ for f in "${FILES[@]}"; do
     fi
 
     size=$(wc -c < "$game/$f" | tr -d ' ')
-    hash=$(shasum -a 256 "$game/$f" 2>/dev/null | cut -d' ' -f1)
+    hash=$(hash_of "$game/$f")
 
     note=''
     case "$f" in
@@ -51,7 +58,7 @@ for f in "${FILES[@]}"; do
             if [ "$hash" = "$KNOWN_CECIL_PDB" ]; then
                 note='matches the known-good pair'
             else
-                note='differs - see the 89600-byte trap in PROVENANCE.md'
+                note='differs - see the 89600-byte trap in the README'
             fi
             ;;
     esac
