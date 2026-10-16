@@ -1,109 +1,107 @@
-# celeste-proton-arm64
+# celeste-everest-proton-arm64
 
-Field notes for running **Celeste + Everest on an ARM64 Android handheld** (Steam + Proton + FEX translation + Wine-Mono), and for recognising the handful of failures that look like mod bugs but are not.
+Getting **Everest** to run on an ARM64 Android handheld (Steam + Proton + FEX translation + Wine-Mono).
 
-Verified on a Retroid Pocket Nova through DroidDeck, and a DroidDeck-class handheld: Celeste `1.4.0.0-fna`, Everest `4449-azure-ddba3`.
+Celeste itself is fine on this stack — the game boots, renders and plays. What fails is Everest's first-run patch step, because patching the game writes an assembly *with debug symbols*, and Cecil's native PDB writer reaches for Windows DIA/COM libraries that Wine does not provide. The fix is small and surgical: a `Mono.Cecil.Pdb.dll` whose native PDB **writer** entry points return `null`, so the patched assembly is written without symbols.
 
-This is not a patch and not affiliated with Everest, MonoMod or Celeste. It is a description of an install that works, plus the stacks to look for when yours does not.
+Verified on a Retroid Pocket Nova through DroidDeck and a DroidDeck-class handheld: Celeste `1.4.0.0-fna`, Everest `4449-azure-ddba3`.
 
-## The short version
+Not affiliated with Everest, MonoMod, Mono.Cecil or Celeste.
 
-Celeste's Windows build runs under Proton, which means Wine's .NET runtime (Wine-Mono) plus x86→ARM translation, and Everest patches the game with MonoMod on first launch. Almost every "it will not boot on the handheld" case we hit was one of three things:
+## The fix
 
-1. **A mod built for the wrong runtime.** Wine-Mono cannot load a `net8.0` assembly. Mods must target `net472`.
-2. **A MonoMod/Cecil file set assembled from more than one build.** Nothing is *broken*, something is *mixed* — usually because the game folder was copied between machines, or DLLs were hand-swapped while troubleshooting.
-3. **A mod built against an Everest-merged `Celeste.dll`.** Compiles clean, dies while loading.
+Two files go into the folder holding `Celeste.exe`:
 
-## Recognise it by the stack
+| File | What it is | SHA-256 (first 16) |
+| --- | --- | --- |
+| [`handheld/Mono.Cecil.Pdb.dll`](handheld/PROVENANCE.md) | Cecil `0.11.4.0`, **rebuilt with the native PDB writer stubbed** | `30e233b32625d933` |
+| [`handheld/MonoMod.exe`](handheld/PROVENANCE.md) | MonoMod `22.1.4.3`, unmodified | `4cc92af374e5c3af` |
 
-### 1. Invalid IL code in a `DMD` wrapper
+Back up what you replace. Then launch once and watch `log.txt` next to the executable.
+
+Only the first file is modified. What it changes, precisely:
+
+```text
+Mono.Cecil.Pdb.PdbWriterProvider::GetSymbolWriter          ldnull / ret   (both overloads)
+Mono.Cecil.Pdb.NativePdbWriterProvider::GetSymbolWriter    ldnull / ret   (both overloads)
+Mono.Cecil.Pdb.NativePdbWriterProvider::CreateWriter       ldnull / ret
+```
+
+Nothing else. The *reader* side (`PdbReaderProvider`, `NativePdbReaderProvider`, `NativePdbReader`) is byte-for-byte what upstream Cecil has, because reading is opt-in and is not what fails. Pristine `PdbWriterProvider::GetSymbolWriter` checks for portable symbols and otherwise constructs a native writer; that construction is the point where Wine runs out of road.
+
+`scripts/check-files.sh /path/to/Celeste` prints size and hash for the whole set so you can confirm what you have.
+
+### Rebuilding the file yourself
+
+The build we use is in `handheld/`, but if you would rather build it, the edit is in Cecil's own source (`0.11.4.0`, <https://github.com/jbevain/cecil>): make `Mono.Cecil.Pdb.PdbWriterProvider.GetSymbolWriter` and `Mono.Cecil.Pdb.NativePdbWriterProvider.GetSymbolWriter` / `CreateWriter` return `null` instead of constructing a writer. Everything else stays upstream. We do not have the exact tree it was built from, so treat the binary as the artifact of record and the edit above as its meaning.
+
+## Why this is the failure, not the mod
+
+The chain that costs people an evening:
+
+1. Celeste runs under Proton, so .NET is Wine-Mono, not Microsoft's runtime.
+2. Everest's first launch patches `Celeste.exe` with MonoMod.
+3. MonoMod writes the patched assembly through Cecil, and asks for a symbol writer.
+4. Cecil's native PDB writer is a COM interop layer over Windows' DIA / `ISymUnmanaged*` APIs. Wine does not ship those libraries.
+5. The write fails during boot. Whether you see a stack, a hang, or nothing at all depends on where the runtime gives up — a Wine-Mono failure can leave the process alive at ~0% CPU, so Steam spins forever and it looks like a slow first launch.
+
+With the writer stubbed, MonoMod is told "no symbol writer" and writes the assembly anyway. Debug symbols are the only casualty, which nobody running Celeste on a handheld cares about.
+
+## Recognising the other, unrelated failures
+
+These are real and we hit all three, but they are *not* solved by the two files above. Read the full stacks in your own logs and match by shape.
+
+### Invalid IL code in a `DMD` wrapper
 
 ```text
 System.InvalidProgramException: Invalid IL code in [wrapper dynamic-method]
 Celeste.ScreenWipe:DMD<Celeste.ScreenWipe::get_Bottom> (Celeste.ScreenWipe): IL_000f: ret
 
-  at [wrapper managed-to-native] System.RuntimeMethodHandle.GetFunctionPointer(intptr)
   at MonoMod.RuntimeDetour.Platforms.DetourRuntimeILPlatform.GetFunctionPointer(MethodBase, RuntimeMethodHandle)
-  at MonoMod.RuntimeDetour.Platforms.DetourRuntimeILPlatform.GetNativeStart(MethodBase)
   at MonoMod.RuntimeDetour.Detour._TopApply()
   at MonoMod.RuntimeDetour.ILHook..ctor(MethodBase, ILContext+Manipulator, ILHookConfig)
-  at Celeste.Mod.CelesteFit.CelesteFitModule.HookMethod(Type, String, ILContext+Manipulator)
 ```
 
-Read it bottom-up. Something applied an `ILHook` to a trivial getter, MonoMod built the wrapper for it by copying the original body out of the assembly **through Cecil**, and the runtime rejected what came out. This is the single most misleading error in the whole bring-up: it points at `GetFunctionPointer`, which is nowhere near the cause, and it names a *random* method — whichever one the mod happened to hook first.
+Everest installed, a mod is loading, and a hook on a trivial getter produced a wrapper the runtime rejected. It names whichever method the mod hooked first, so the method is a red herring; the useful part is that this is a *runtime hooking* failure, not a boot failure. Well-behaved mods catch it and log a warning rather than dying — see [celeste-43aspect](https://github.com/jevonlipsey/celeste-43aspect) for a mod written that way.
 
-Cause on our units: the `MonoMod.exe` / `Mono.Cecil.Pdb.dll` files in the install did not come from the same build as the rest of the set. Installing a matching pair stopped it. The pair that works on ours is in [`handheld/`](handheld/PROVENANCE.md).
-
-This is also why well-behaved mods catch hook failures instead of throwing: one unhookable getter should cost you one patch, not the whole mod load.
-
-### 2. MissingMethodException while a mod loads
+### MissingMethodException while a mod loads
 
 ```text
 System.MissingMethodException: Method not found: void .<>c..ctor(int,int,Celeste.Mod.LogLevel,string,bool)
   at Celeste.Mod.CelesteFit.CelesteFitModule.Load ()
-  at Celeste.Mod.Everest+Loader.LoadModAssembly (...)
 ```
 
-The mod was built against an **Everest-merged `Celeste.dll`**. It compiles fine and fails here. Build against the pristine game assembly plus `Celeste.Mod.mm.dll` as a separate reference:
+That mod was built against an **Everest-merged `Celeste.dll`**. It compiles clean and dies at load. Build against the pristine game assembly plus `Celeste.Mod.mm.dll` separately.
 
-```text
-Celeste.dll        Celeste.Mod.mm.dll     FNA.dll
-MonoMod.Utils.dll  MonoMod.RuntimeDetour.dll   Mono.Cecil.dll
-```
+### Nothing at all
 
-### 3. No error at all
+No `[Everest] Booting` line, process at ~0% CPU, Steam waiting. Not slow — dead. Restart Steam rather than waiting, then apply the fix above.
 
-`log.txt` never gets an `[Everest] Booting` line, and the process sits at ~0% CPU, state `S`. That is not a slow boot, it is blocked or dead — a Wine-Mono crash can leave the process alive and idle, so Steam waits forever. Restart Steam rather than waiting, then work through the two cases above.
+## Deploying files to the handheld
 
-## The install set that works
-
-These must all come from **one** Everest build. Reported assembly versions from our working unit:
-
-| File | Version | Notes |
-| --- | --- | --- |
-| `MonoMod.exe` | `22.1.4.3` | the patcher CLI |
-| `MonoMod.Utils.dll` | `22.1.4.3` | |
-| `MonoMod.RuntimeDetour.dll` | `22.1.4.3` | what mod IL hooks use |
-| `MonoMod.Core.dll` | `1.3.1.0` | |
-| `MonoMod.Patcher.dll` | `0.0.0.0` | |
-| `Mono.Cecil.dll` | `0.11.4.0` | |
-| `Mono.Cecil.Pdb.dll` | `0.11.4.0` | the file that bit us — see below |
-
-**Matching versions do not mean matching files.** The macOS and Windows Everest 4449 releases both ship a `Mono.Cecil.Pdb.dll` that reports `0.11.4.0`, and they are not the same binary: 89600 bytes (macOS) versus 88064 bytes (Windows). The 88064-byte one is what works for us. Do not pick files by reported version, and do not cross-copy between platform builds.
-
-`scripts/check-files.sh /path/to/Celeste` prints size and SHA-256 for the whole set so you can compare against [`handheld/PROVENANCE.md`](handheld/PROVENANCE.md).
-
-## Installing the pair
-
-Copy both files from [`handheld/`](handheld/) into the folder holding `Celeste.exe`, replacing what is there, and keep a backup of the originals. Then launch once and watch `log.txt`.
-
-## Deploying mods to the handheld
-
-`adb` connects as the unprivileged `shell` user, which cannot write Steam's game folder. The loop is:
+`adb` connects as the unprivileged `shell` user, which cannot write Steam's game folder. Stage in `/sdcard/Download`, then copy into place from a terminal **on the device**:
 
 ```bash
-adb push MyMod.zip /sdcard/Download/
+adb push handheld/Mono.Cecil.Pdb.dll /sdcard/Download/
 ```
 
-then copy the zip from `/sdcard/Download` into `Celeste/Mods/` from a terminal **on the device**, and start the game. Everest installs it on boot.
+## Props and traps
 
-## Traps
+- **Keep the whole MonoMod/Cecil set from one build.** Version numbers lie: the macOS and Windows Everest 4449 releases both ship a `Mono.Cecil.Pdb.dll` reporting `0.11.4.0`, and they are different binaries (89600 bytes, hashes `447ede1984bb` / `a5249a04ad8f`) — both pristine, both fail here.
+- **Steam "verify integrity" and auto-update will overwrite the patched files and `Celeste.exe`.** Keep auto-update off, or re-apply after.
+- **Launch options cannot change the runtime.** `WINEDLLOVERRIDES="mscoree=b" %command%` prepends to what the handheld's Proton config already sets and loses.
+- **Celeste needs the FNA branch** (`beta-1.3.3.0` on Steam, or the itch FNA build) for modern Everest at all.
+- **Mods must be `net472`.** Wine-Mono cannot load a `net8.0` assembly.
 
-- **Steam "verify integrity" and auto-update overwrite the patched `Celeste.exe`.** Keep auto-update off for this game, or re-run Everest afterwards.
-- **Launch options cannot change the .NET runtime.** `WINEDLLOVERRIDES="mscoree=b" %command%` prepends to a value the handheld's own Proton config already sets, so it does not win.
-- **0% CPU is dead, not slow.** See case 3.
-- **A fresh install beats a repaired one.** If the set is mixed, re-extract Everest for that install rather than swapping files one at a time; a half-swapped install is how we got here.
+## Open questions
 
-## What we do not know
+- Whether a *pristine* Everest install ever survives its first patch on this stack without the stubbed Cecil. Every device we set up already needed it, which suggests not, but that is not proof.
+- `MonoMod.exe` here is byte-identical to the stock Everest 4449 build, so it is supplied unmodified. If your working install has a different one, that is a data point we would like.
 
-- **Why the `Mono.Cecil.Pdb.dll` binary matters at all.** Both candidates report version `0.11.4.0` and both are plain IL assemblies, so the difference is presumably in how they are built (framework target, facades) rather than what they claim to be. This is inferred from "it stopped failing after the swap", not proven.
-- **Whether a clean, consistent install ever shows the `DMD` failure.** Every device we touched had already been assembled by copying folders between machines. If you set one up from scratch and it boots fine, that is a data point — open an issue.
-- **Strawberry Jam and other large mod packs** are untested on ARM here.
+## Related
 
-## Worked example
-
-[**celeste-43aspect**](https://github.com/jevonlipsey/celeste-43aspect) is a 4:3 aspect-ratio mod for PC Celeste that runs on exactly this stack, and its `docs/HANDHELD-NOTES.md` is where the notes above came from. If you want to see a mod that survives all of this, start there.
+[**celeste-43aspect**](https://github.com/jevonlipsey/celeste-43aspect) — a 4:3 aspect-ratio mod for PC Celeste that runs on exactly this stack, and where these notes came from.
 
 ## If you are stuck
 
-Open an issue with: the device, the Proton/FEX version, Celeste + Everest build strings from the top of `log.txt`, and the full stack trace. The stack is what identifies the case.
+Open an issue with the device, Proton/FEX version, the Celeste + Everest build strings from the top of `log.txt`, and the full stack trace.
