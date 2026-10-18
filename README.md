@@ -62,7 +62,7 @@ A mod built for this stack: [celeste-43aspect](https://github.com/jevonlipsey/ce
 
 ## What is in the patch, exactly
 
-Two files, both at the release zip's root:
+Two files, inside the zip's single `mono-patches/` folder next to `INSTALL.txt` and `SHA256SUMS`:
 
 | File | Size | SHA-256 | Modified? |
 | --- | --- | --- | --- |
